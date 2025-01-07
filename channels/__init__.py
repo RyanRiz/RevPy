@@ -13,7 +13,7 @@ class WebSocketChannel:
 
     async def connect(self):
         """ Establish a WebSocket connection and subscribe to the channel."""
-        self.websocket = await connect(self.uri)
+        self.websocket = await connect(self.uri, ping_timeout=None)
         await self.subscribe()
 
     async def subscribe(self):
@@ -32,7 +32,9 @@ class WebSocketChannel:
         if self.subscribed:
             await self.websocket.send(json.dumps({
                 'event': 'pusher:unsubscribe',
-                'channel': self.name
+                'data': {
+                    'channel': self.name
+                }
             }))
             self.subscribed = False
             await self.websocket.close()
@@ -40,10 +42,10 @@ class WebSocketChannel:
     async def send(self, event, data):
         """ Send a message to the channel."""
         if self.subscribed:
+            structered_data = {'channel': self.name, **data}
             await self.websocket.send(json.dumps({
                 'event': event,
-                'channel': self.name,
-                'data': data
+                'data': structered_data
             }))
 
     async def listen(self, event, callback):
@@ -71,10 +73,10 @@ class WebSocketChannel:
 class WebSocketPrivateChannel(WebSocketChannel):
     async def whisper(self, event_name, data):
         """ Send a whisper to the private channel."""
+        structered_data = {'channel': self.name, **data}
         await self.websocket.send(json.dumps({
             'event': f'client-{event_name}',
-            'channel': self.name,
-            'data': data
+            'data': structered_data
         }))
 
 
