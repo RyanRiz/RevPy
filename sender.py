@@ -40,8 +40,8 @@ class MessageSender:
 
         message_data = {
             "event": "client-message",
+            "channel": "chat",
             "data": {
-                "channel": "chat",
                 "message": message
             }
         }
