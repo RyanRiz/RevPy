@@ -6,6 +6,10 @@ async def message_handler(data):
     print(f"Received message: {data}")
 
 async def main():
+    """
+    Change the authEndpoint to the URL of your authentication endpoint
+    if you want to use authentication with your Reverb server instead of using secret tokens.
+    """
     options = {
         'authEndpoint': 'http://localhost:8000/broadcasting/auth',
         'auth': {

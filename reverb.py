@@ -27,6 +27,11 @@ class Reverb:
     async def connect(self):
         """Establish connection to Reverb server"""
         return await self.connector.connect()
+    
+    async def disconnect(self):
+        """Close connection to Reverb server"""
+        if self.connector:
+            await self.connector.disconnect()
 
     async def channel(self, name):
         """Subscribe to a public channel"""
