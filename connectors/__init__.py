@@ -26,7 +26,7 @@ def setup_logging(debug=False):
     file_handler.setLevel(logging.DEBUG if debug else logging.INFO)
     
     # Create formatters and add it to handlers
-    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    log_format = logging.Formatter('\n%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(log_format)
     file_handler.setFormatter(log_format)
     
@@ -38,12 +38,13 @@ def setup_logging(debug=False):
 
 class WebSocketConnector:
     def __init__(self, uri, options):
-        # Existing initialization
+        # Initialization
         self.uri = uri
         self.options = options
         self.websocket = None
         self.socket_id = None
         self.channels = {}
+        self.channel_states = {}
         self.key = options.get('key')
         self.secret = options.get('secret')
         self.app_key = options.get('app_key')
@@ -74,6 +75,18 @@ class WebSocketConnector:
         # Connection status
         self.connection_ready = False
         self.connection_established = asyncio.Event()
+
+        # Background tasks
+        self.listener_task = None
+        self.listener_active = False
+        self.listener_lock = asyncio.Lock()
+
+    async def _start_message_listener(self):
+        """Start new message listener if none exists"""
+        async with self.listener_lock:
+            if not self.listener_active:
+                self.listener_active = True
+                self.listener_task = asyncio.create_task(self._listen_for_messages())
 
     async def _wait_for_connection(self):
         """Wait for connection to be ready"""
@@ -119,9 +132,8 @@ class WebSocketConnector:
                         else:
                             print("Connected successfully")
                         
-                        # Start background tasks
-                        asyncio.create_task(self._listen_for_messages())
-                        # asyncio.create_task(self._start_heartbeat())
+                        # Start new message listener
+                        await self._start_message_listener()
                         return self
                         
                     raise ConnectionError("Unexpected connection response")
@@ -169,44 +181,148 @@ class WebSocketConnector:
         await asyncio.sleep(backoff)
 
     async def reconnect(self, reconnect_interval=None):
-        """Reconnect to the WebSocket server"""
+        """Enhanced reconnect with listener management"""
         if self.state == "reconnecting":
             return
             
         self.state = "reconnecting"
+        self.listener_active = False  # Stop current listener
+        
+        if self.listener_task:
+            self.listener_task.cancel()
+            try:
+                await self.listener_task
+            except asyncio.CancelledError:
+                pass
+            self.listener_task = None
+            
+        # Store channel states
+        stored_channels = {
+            name: self._serialize_channel(name, channel)
+            for name, channel in self.channels.items()
+        }
+        
+        # Perform reconnection
         if reconnect_interval is None:
             reconnect_interval = self.default_reconnect_interval
             
         self.logger.info(f"Connection: Reconnect in {reconnect_interval}s")
-        self.reconnect_interval = reconnect_interval
         
-        self.needs_reconnect = True
         if self.websocket:
             await self.websocket.close()
+            self.websocket = None
             
         await asyncio.sleep(reconnect_interval)
         await self.connect()
+        
+        # Restore channels after reconnection
+        if self.connection_ready:
+            await self._restore_channels(stored_channels)
+            self.logger.info("Successfully reconnected and restored channels")
 
     async def disconnect(self):
-        """Close WebSocket connection"""
+        """Enhanced disconnect with listener cleanup"""
+        self.disconnect_called = True
+        self.listener_active = False
+        
+        if self.listener_task:
+            self.listener_task.cancel()
+            try:
+                await self.listener_task
+            except asyncio.CancelledError:
+                pass
+            self.listener_task = None
+            
         if self.websocket:
             await self.websocket.close()
             self.websocket = None
             self.socket_id = None
 
-    async def send(self, event, data, channel=None):
-        """Send message through WebSocket"""
-        if not self.websocket:
-            raise ConnectionError("Not connected")
-            
-        message = {
-            'event': event,
-            'data': data
+    def _serialize_channel(self, channel_name, channel):
+        """Convert channel to serializable format"""
+        return {
+            'name': channel_name,
+            'auth': channel.auth,
+            'subscribed': channel.subscribed
         }
-        if channel:
-            message['channel'] = channel
-            
-        await self.websocket.send(json.dumps(message))
+        
+    async def _restore_channels(self, stored_channels):
+        """Restore channels after reconnection"""
+        for channel_name, state in stored_channels.items():
+            if channel_name.startswith(('private-', 'presence-')):
+                auth = await self._generate_auth_token(channel_name)
+                channel = WebSocketChannel(self, channel_name, auth)
+            else:
+                channel = WebSocketChannel(self, channel_name)
+                
+            self.channels[channel_name] = channel
+            if state['subscribed']:
+                await channel.subscribe()
+
+    async def send(self, event, data, channel=None):
+        """Send message through WebSocket with retry and reconnect"""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                if not self.websocket or not self.connection_ready:
+                    await self.connect()
+                
+                # Create serializable message
+                message = {
+                    'event': event,
+                    'data': data
+                }
+                if channel:
+                    message['channel'] = channel if isinstance(channel, str) else channel.name
+                
+                await self.websocket.send(json.dumps(message))
+                return
+                
+            except websockets.ConnectionClosedError:
+                retry_count += 1
+                self.logger.info(f"Connection closed. Attempting reconnect ({retry_count}/{max_retries})")
+                
+                # Store channel states before reconnection
+                self.channel_states = {
+                    name: self._serialize_channel(name, chan) 
+                    for name, chan in self.channels.items()
+                }
+                self.channels = {}
+                
+                # Reset connection state
+                self.connection_ready = False
+                self.connection_established.clear()
+                self.websocket = None
+                
+                if retry_count < max_retries:
+                    # Attempt reconnection with backoff
+                    await asyncio.sleep(retry_count * 2)
+                    await self.connect()
+                    
+                    # Restore channels
+                    await self._restore_channels(self.channel_states)
+                    continue
+                    
+            except TypeError as e:
+                # Handle JSON serialization errors
+                if "not JSON serializable" in str(e):
+                    self.logger.error(f"Serialization error: {str(e)}")
+                    message['channel'] = str(channel)
+                    retry_count += 1
+                    continue
+                raise
+                
+            except Exception as e:
+                self.logger.error(f"Send error: {str(e)}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    await asyncio.sleep(retry_count)
+                    continue
+                raise
+                
+        raise ConnectionError("Failed to send message after maximum retries")
 
     async def _generate_auth_token(self, channel_name):
         """Generate authentication token"""
@@ -385,34 +501,44 @@ class WebSocketConnector:
             self.logger.error("Connection: No error code supplied")
 
     async def _listen_for_messages(self):
-        """Listen for incoming WebSocket messages"""
+        """Enhanced message listener with reconnection handling"""
         try:
             while self.websocket and not self.disconnect_called:
-                message = await self.websocket.recv()
-                if self.debug:
-                    self.logger.debug(f"Received: {message}")
-                data = json.loads(message)
-                
-                if 'event' in data:
-                    event = data['event']
-                    event_data = data.get('data')
-                    channel = data.get('channel')
-
-                    # Log incoming events
+                try:
+                    message = await self.websocket.recv()
                     if self.debug:
-                        self.logger.debug(f"Processing event: {event}")
-                        self.logger.debug(f"Channel: {channel}")
-                        self.logger.debug(f"Data: {event_data}")
+                        self.logger.debug(f"Received: {message}")
+                    data = json.loads(message)
                     
-                    # Handle internal events
-                    await self.handle_event(event, event_data)
-                    
-                    # Handle channel events
-                    if channel and channel in self.channels:
-                        await self.channels[channel].handle_event(event, event_data)
+                    if 'event' in data:
+                        event = data['event']
+                        event_data = data.get('data')
+                        channel = data.get('channel')
+
+                        if self.debug:
+                            self.logger.debug(f"Processing event: {event}")
+                            self.logger.debug(f"Channel: {channel}")
+                            self.logger.debug(f"Data: {event_data}")
                         
-        except websockets.ConnectionClosed:
-            if self.debug:
-                self.logger.debug("WebSocket connection closed")
-            if not self.disconnect_called and self.needs_reconnect:
+                        # Handle internal events
+                        await self.handle_event(event, event_data)
+                        
+                        # Handle channel events
+                        if channel and channel in self.channels:
+                            await self.channels[channel].handle_event(event, event_data)
+                            
+                except websockets.ConnectionClosed:
+                    if self.debug:
+                        self.logger.debug("WebSocket connection closed")
+                    if not self.disconnect_called:
+                        self.needs_reconnect = True
+                        await self.reconnect()
+                        break
+                        
+        except Exception as e:
+            self.logger.error(f"Message listener error: {str(e)}")
+            if not self.disconnect_called:
+                self.needs_reconnect = True
                 await self.reconnect()
+        finally:
+            self.listener_active = False
