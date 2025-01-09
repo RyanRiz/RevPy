@@ -66,7 +66,7 @@ class TerminalChat:
         """Print formatted chat message"""
         self.clear_line()
         timestamp = f"[{datetime.now().strftime('%H:%M:%S')}] " if show_timestamp else ""
-        print(colored(f"\n{timestamp}{sender}: {message}", color))
+        print(colored(f"\n{timestamp}{sender}: {message}\n", color))
         print(colored(f"{self.user}: ", "green"), end='', flush=True)
 
     async def message_handler(self, data):
