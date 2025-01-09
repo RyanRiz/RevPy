@@ -1,94 +1,35 @@
-import json
-from websockets import connect
+from collections import defaultdict
 
 class WebSocketChannel:
-
-    def __init__(self, uri, name, options):
-        self.uri = uri
+    def __init__(self, connector, name, auth=None):
+        self.connector = connector
         self.name = name
-        self.options = options
-        self.websocket = None
+        self.auth = auth
+        self.event_handlers = defaultdict(list)
         self.subscribed = False
-        self.listeners = {}
-
-    async def connect(self):
-        """ Establish a WebSocket connection and subscribe to the channel."""
-        self.websocket = await connect(self.uri)
-        await self.subscribe()
 
     async def subscribe(self):
-        """ Subscribe to the channel if not already subscribed."""
+        """Subscribe to channel"""
         if not self.subscribed:
-            await self.websocket.send(json.dumps({
-                'event': 'pusher:subscribe',
-                'data': {
-                    'channel': self.name,
-                }
-            }))
+            data = {'channel': self.name}
+            if isinstance(self.auth, dict):
+                data.update(self.auth)
+            elif self.auth:
+                data['auth'] = self.auth
+                
+            await self.connector.send('pusher:subscribe', data)
             self.subscribed = True
 
-    async def unsubscribe(self):
-        """ Unsubscribe from the channel and close the WebSocket connection."""
-        if self.subscribed:
-            await self.websocket.send(json.dumps({
-                'event': 'pusher:unsubscribe',
-                'data': {
-                    'channel': self.name,
-                }
-            }))
-            self.subscribed = False
-            await self.websocket.close()
-
     async def send(self, event, data):
-        """ Send a message to the channel."""
-        if self.subscribed:
-            await self.websocket.send(json.dumps({
-                'event': event,
-                'channel': self.name,
-                'data': data
-            }))
+        """Send message on channel"""
+        event = f'client-{event}'
+        await self.connector.send(event, data, self.name)
 
     async def listen(self, event, callback):
-        """ Start listening for events on the channel."""
-        self.listeners[event] = callback
+        """Bind event handler"""
+        self.event_handlers[event].append(callback)
 
-    async def stop_listening(self, event):
-        """ Stop listening for a specific event."""
-        if event in self.listeners:
-            del self.listeners[event]
-
-    async def handle_message(self, message):
-        """ Handle incoming messages and trigger the appropriate listener."""
-        data = json.loads(message)
-        if 'event' in data and data['event'] in self.listeners:
-            self.listeners[data['event']](data.get('data'))
-
-    async def run(self):
-        """ Run the channel to keep listening for messages."""
-        while self.subscribed:
-            message = await self.websocket.recv()
-            await self.handle_message(message)
-
-
-class WebSocketPrivateChannel(WebSocketChannel):
-    async def whisper(self, event_name, data):
-        """ Send a whisper to the private channel."""
-        await self.websocket.send(json.dumps({
-            'event': f'client-{event_name}',
-            'channel': self.name,
-            'data': data
-        }))
-
-
-class WebSocketPresenceChannel(WebSocketPrivateChannel):
-    async def here(self, callback):
-        """ Get the current members of the presence channel."""
-        await self.listen('pusher:subscription_succeeded', lambda data: callback(data['members']))
-
-    async def joining(self, callback):
-        """ Listen for new members joining the presence channel."""
-        await self.listen('pusher:member_added', lambda data: callback(data['info']))
-
-    async def leaving(self, callback):
-        """ Listen for members leaving the presence channel."""
-        await self.listen('pusher:member_removed', lambda data: callback(data['info']))
+    async def handle_event(self, event, data):
+        """Handle incoming event"""
+        for handler in self.event_handlers[event]:
+            await handler(data)

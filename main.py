@@ -1,18 +1,45 @@
+# main.py
 import asyncio
 from reverb import Reverb
 
+async def message_handler(data):
+    print(f"Received message: {data}")
+
 async def main():
-    options = {}
-    echo = Reverb(options)
+    options = {
+        'authEndpoint': 'http://localhost:8000/broadcasting/auth',
+        'auth': {
+            'headers': {
+                'Accept': 'application/json',
+                'Authorization': 'Bearer my-secret-token'
+            }
+        }
+    }
+    
+    reverb = Reverb(options)
+    
+    try:
+        # Connect to Reverb server
+        await reverb.connect()
 
-    channel = await echo.channel('chat')
-    await channel.listen('client-message', lambda data: print(f"New message: {data}"))
+        # Connect to private channel
+        channel = await reverb.presence('chat.1')
+        
+        # Bind to events
+        await channel.listen('chat-message', message_handler)
+        
+        # Send test message
+        await channel.send('chat-message', {'message': 'Hello World!'})
+        
+        # Keep connection alive
+        while True:
+            await asyncio.sleep(1)
+            
+    except KeyboardInterrupt:
+        await reverb.disconnect()
 
-    await channel.send('client-message', {'message': 'Hello, World!'})
-
-    await channel.run()
-
-try:
-    asyncio.run(main())
-except KeyboardInterrupt:
-    print("\nProgram terminated by user")
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Program terminated")
