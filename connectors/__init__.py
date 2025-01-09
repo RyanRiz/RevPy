@@ -81,12 +81,100 @@ class WebSocketConnector:
         self.listener_active = False
         self.listener_lock = asyncio.Lock()
 
+        # Enhanced task management
+        self.tasks = set()
+        self.active_listener = None
+        self.listener_state = asyncio.Event()
+        
+        # Enhanced queue management
+        self.message_queue = asyncio.Queue()
+        self.processing = False
+        self.messages_in_flight = 0
+        self.queue_lock = asyncio.Lock()
+
+    async def _process_messages(self):
+        """Process messages from queue with enhanced error handling"""
+        self.processing = True
+        
+        try:
+            while self.processing:
+                try:
+                    # Get message with timeout to allow clean shutdown
+                    message = await asyncio.wait_for(
+                        self.message_queue.get(),
+                        timeout=1.0
+                    )
+                    
+                    if message is None:  # Shutdown signal
+                        break
+                        
+                    try:
+                        data = json.loads(message)
+                        if 'event' in data:
+                            event = data['event']
+                            event_data = data.get('data')
+                            channel = data.get('channel')
+
+                            if self.debug:
+                                self.logger.debug(f"Processing event: {event}")
+                                self.logger.debug(f"Channel: {channel}")
+                                self.logger.debug(f"Data: {event_data}")
+                            
+                            # Handle internal events
+                            await self.handle_event(event, event_data)
+                            
+                            # Handle channel events
+                            if channel and channel in self.channels:
+                                await self.channels[channel].handle_event(event, event_data)
+                                
+                    except json.JSONDecodeError as e:
+                        self.logger.error(f"Invalid message format: {str(e)}")
+                    except Exception as e:
+                        self.logger.error(f"Message processing error: {str(e)}")
+                    finally:
+                        # Only mark task as done if we actually got a message
+                        self.message_queue.task_done()
+                        
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    self.logger.error(f"Queue processing error: {str(e)}")
+                    await asyncio.sleep(1)  # Prevent tight error loop
+                    
+        except Exception as e:
+            self.logger.error(f"Message processor error: {str(e)}")
+        finally:
+            self.processing = False
+
     async def _start_message_listener(self):
-        """Start new message listener if none exists"""
+        """Start message listener with queue management"""
         async with self.listener_lock:
-            if not self.listener_active:
-                self.listener_active = True
-                self.listener_task = asyncio.create_task(self._listen_for_messages())
+            # Cancel existing tasks
+            if self.active_listener and not self.active_listener.done():
+                self.active_listener.cancel()
+                try:
+                    await self.active_listener
+                except asyncio.CancelledError:
+                    pass
+                    
+            # Clear queue state
+            while not self.message_queue.empty():
+                try:
+                    self.message_queue.get_nowait()
+                    self.message_queue.task_done()
+                except (asyncio.QueueEmpty, ValueError):
+                    pass
+                    
+            # Start new processor
+            processor = asyncio.create_task(self._process_messages())
+            self.tasks.add(processor)
+            
+            # Start new listener
+            self.listener_state.set()
+            self.active_listener = asyncio.create_task(self._listen_for_messages())
+            self.tasks.add(self.active_listener)
 
     async def _wait_for_connection(self):
         """Wait for connection to be ready"""
@@ -181,44 +269,42 @@ class WebSocketConnector:
         await asyncio.sleep(backoff)
 
     async def reconnect(self, reconnect_interval=None):
-        """Enhanced reconnect with listener management"""
+        """Reconnect with queue cleanup"""
         if self.state == "reconnecting":
             return
             
         self.state = "reconnecting"
-        self.listener_active = False  # Stop current listener
+        self.processing = False
+        self.listener_state.clear()
         
-        if self.listener_task:
-            self.listener_task.cancel()
+        # Clean up queue
+        while not self.message_queue.empty():
             try:
-                await self.listener_task
-            except asyncio.CancelledError:
+                self.message_queue.get_nowait()
+                self.message_queue.task_done()
+            except (asyncio.QueueEmpty, ValueError):
                 pass
-            self.listener_task = None
-            
+        
         # Store channel states
         stored_channels = {
             name: self._serialize_channel(name, channel)
             for name, channel in self.channels.items()
         }
         
-        # Perform reconnection
-        if reconnect_interval is None:
-            reconnect_interval = self.default_reconnect_interval
-            
-        self.logger.info(f"Connection: Reconnect in {reconnect_interval}s")
-        
         if self.websocket:
             await self.websocket.close()
             self.websocket = None
             
-        await asyncio.sleep(reconnect_interval)
-        await self.connect()
+        await asyncio.sleep(reconnect_interval or self.default_reconnect_interval)
         
-        # Restore channels after reconnection
-        if self.connection_ready:
-            await self._restore_channels(stored_channels)
-            self.logger.info("Successfully reconnected and restored channels")
+        try:
+            await self.connect()
+            if self.connection_ready:
+                await self._restore_channels(stored_channels)
+                self.logger.info("Successfully reconnected and restored channels")
+                await self._start_message_listener()
+        except Exception as e:
+            self.logger.error(f"Reconnection failed: {str(e)}")
 
     async def disconnect(self):
         """Enhanced disconnect with listener cleanup"""
@@ -501,44 +587,25 @@ class WebSocketConnector:
             self.logger.error("Connection: No error code supplied")
 
     async def _listen_for_messages(self):
-        """Enhanced message listener with reconnection handling"""
+        """Enhanced message listener with queue"""
         try:
-            while self.websocket and not self.disconnect_called:
+            while self.listener_state.is_set() and self.websocket:
                 try:
                     message = await self.websocket.recv()
                     if self.debug:
                         self.logger.debug(f"Received: {message}")
-                    data = json.loads(message)
+                    await self.message_queue.put(message)
                     
-                    if 'event' in data:
-                        event = data['event']
-                        event_data = data.get('data')
-                        channel = data.get('channel')
-
-                        if self.debug:
-                            self.logger.debug(f"Processing event: {event}")
-                            self.logger.debug(f"Channel: {channel}")
-                            self.logger.debug(f"Data: {event_data}")
-                        
-                        # Handle internal events
-                        await self.handle_event(event, event_data)
-                        
-                        # Handle channel events
-                        if channel and channel in self.channels:
-                            await self.channels[channel].handle_event(event, event_data)
-                            
                 except websockets.ConnectionClosed:
                     if self.debug:
                         self.logger.debug("WebSocket connection closed")
                     if not self.disconnect_called:
-                        self.needs_reconnect = True
                         await self.reconnect()
-                        break
-                        
+                    break
+                    
         except Exception as e:
-            self.logger.error(f"Message listener error: {str(e)}")
+            self.logger.error(f"Listener error: {str(e)}")
             if not self.disconnect_called:
-                self.needs_reconnect = True
                 await self.reconnect()
         finally:
-            self.listener_active = False
+            self.listener_state.clear()
