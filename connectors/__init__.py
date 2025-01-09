@@ -121,7 +121,7 @@ class WebSocketConnector:
                         
                         # Start background tasks
                         asyncio.create_task(self._listen_for_messages())
-                        asyncio.create_task(self._start_heartbeat())
+                        # asyncio.create_task(self._start_heartbeat())
                         return self
                         
                     raise ConnectionError("Unexpected connection response")
@@ -341,7 +341,7 @@ class WebSocketConnector:
             self.state = "connected"
             
             # Start heartbeat
-            asyncio.create_task(self._start_heartbeat())
+            # asyncio.create_task(self._start_heartbeat())
             
         elif event == 'pusher:connection_failed':
             self.state = "failed"
