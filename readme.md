@@ -293,7 +293,7 @@ async def main():
         await reverb.connect()
 
         # Connect to public channel
-        channel = await reverb.channel('chat.1')
+        channel = await reverb.channel('chat')
 
         # Connect to private channel
         channel = await reverb.private('chat.1')
@@ -302,10 +302,10 @@ async def main():
         channel = await reverb.presence('chat.1')
         
         # Bind to events
-        await channel.listen('chat-message', message_handler)
+        await channel.listen('client-chat-message', message_handler)
         
         # Send test message
-        await channel.send('chat-message', {'message': 'Hello World!'})
+        await channel.send('client-chat-message', {'message': 'Hello World!'})
         
         # Keep connection alive
         while True:

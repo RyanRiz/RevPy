@@ -1,6 +1,6 @@
 # main.py
 import asyncio
-from reverb import Reverb
+from revpy import RevPy
 
 async def message_handler(data):
     print(f"Received message: {data}")
@@ -30,10 +30,10 @@ async def main():
         channel = await reverb.presence('chat.1')
         
         # Bind to events
-        await channel.listen('chat-message', message_handler)
+        await channel.listen('client-chat-message', message_handler)
         
         # Send test message
-        await channel.send('chat-message', {'message': 'Hello World!'})
+        await channel.send('client-chat-message', {'message': 'Hello World!'})
         
         # Keep connection alive
         while True:
