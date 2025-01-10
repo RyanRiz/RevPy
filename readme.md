@@ -1,4 +1,4 @@
-# Laravel Reverb Project
+# RevPy
 
 Laravel Reverb Client implemented in Python.
 
@@ -10,13 +10,14 @@ Laravel Reverb Client implemented in Python.
 - Usage
 - Architecture
 - API Documentation
+- Credits
 
 ## ✨ Features
 - User authentication
 - Reconnection handling
 - Heartbeat mechanism
 - Channel state persistence
-- Example message sender using client
+- Example program: Simple message sender in terminal
 
 ## 🔧 Prerequisites
 - Python 3.11+

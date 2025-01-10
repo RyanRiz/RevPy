@@ -1,7 +1,7 @@
 import getpass
 import asyncio
 from termcolor import colored
-from reverb import Reverb
+from revpy import RevPy
 from dotenv import load_dotenv
 from datetime import datetime
 import json

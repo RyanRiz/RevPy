@@ -4,8 +4,7 @@ from connectors import WebSocketConnector
 
 load_dotenv()
 
-# reverb.py
-class Reverb:
+class RevPy:
     def __init__(self, options):
         self.key = os.getenv('REVERB_APP_KEY')
         self.secret = os.getenv('REVERB_APP_SECRET')
