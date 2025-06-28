@@ -20,7 +20,7 @@ async def main():
         }
     }
     
-    reverb = Reverb(options)
+    reverb = RevPy(options)
     
     try:
         # Connect to Reverb server

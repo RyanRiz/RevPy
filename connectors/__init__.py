@@ -195,36 +195,33 @@ class WebSocketConnector:
                     self.logger.debug(f"Connecting to {self.uri}")
                     self.logger.debug(f"Connection attempt {self.retry_count + 1}/{self.max_retries}")
                 
-                # Add connection timeout
-                async with asyncio.timeout(self.connect_timeout):
-                    self.websocket = await websockets.connect(
+                # Add connection timeout (compatible with Python <3.11)
+                self.websocket = await asyncio.wait_for(
+                    websockets.connect(
                         self.uri,
                         close_timeout=5,
                         ping_interval=None
-                    )
-                    
-                    # Wait for connection established message
-                    message = await self.websocket.recv()
+                    ),
+                    timeout=self.connect_timeout
+                )
+                # Wait for connection established message
+                message = await self.websocket.recv()
+                if self.debug:
+                    self.logger.debug(f"Received message: {message}")
+                data = json.loads(message)
+                if data['event'] == 'pusher:connection_established':
+                    self.socket_id = json.loads(data['data'])['socket_id']
+                    self.state = "connected"
+                    self.connection_ready = True
+                    self.connection_established.set()
                     if self.debug:
-                        self.logger.debug(f"Received message: {message}")
-                    data = json.loads(message)
-                    
-                    if data['event'] == 'pusher:connection_established':
-                        self.socket_id = json.loads(data['data'])['socket_id']
-                        self.state = "connected"
-                        self.connection_ready = True
-                        self.connection_established.set()
-                        
-                        if self.debug:
-                            self.logger.debug(f"Connected successfully with socket_id: {self.socket_id}")
-                        else:
-                            print("Connected successfully")
-                        
-                        # Start new message listener
-                        await self._start_message_listener()
-                        return self
-                        
-                    raise ConnectionError("Unexpected connection response")
+                        self.logger.debug(f"Connected successfully with socket_id: {self.socket_id}")
+                    else:
+                        print("Connected successfully")
+                    # Start new message listener
+                    await self._start_message_listener()
+                    return self
+                raise ConnectionError("Unexpected connection response")
                     
             except asyncio.TimeoutError:
                 self.logger.error(f"Connection attempt timed out after {self.connect_timeout}s")
@@ -509,22 +506,24 @@ class WebSocketConnector:
         try:
             await self.send('pusher:ping', '')
             self.pong_received = False
-            
             # Wait for pong response
             try:
-                async with asyncio.timeout(self.pong_timeout):
-                    while not self.pong_received and self.websocket:
-                        await asyncio.sleep(1)
-                    
-                    if not self.pong_received:
-                        self.logger.info("Did not receive pong in time. Reconnecting.")
-                        await self.reconnect()
+                await asyncio.wait_for(
+                    self._wait_for_pong(),
+                    timeout=self.pong_timeout
+                )
             except asyncio.TimeoutError:
                 self.logger.info("Pong timeout. Reconnecting.")
                 await self.reconnect()
-                
         except Exception as e:
             self.logger.error(f"Failed to send ping: {str(e)}")
+
+    async def _wait_for_pong(self):
+        while not self.pong_received and self.websocket:
+            await asyncio.sleep(1)
+        if not self.pong_received:
+            self.logger.info("Did not receive pong in time. Reconnecting.")
+            await self.reconnect()
 
     async def send_pong(self):
         """Send pong message"""

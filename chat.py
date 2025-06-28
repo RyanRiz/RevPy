@@ -104,7 +104,7 @@ class TerminalChat:
             }
         }
         
-        self.reverb = Reverb(options)
+        self.reverb = RevPy(options)
         await self.reverb.connect()
         
         # Subscribe to private channel for the chatroom
